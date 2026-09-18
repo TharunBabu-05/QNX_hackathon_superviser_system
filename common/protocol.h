@@ -14,11 +14,21 @@
 // Pulse codes delivered on the supervisor's channel. Values below
 // _PULSE_CODE_MINAVAIL are reserved by the kernel and other subsystems,
 // so every application-defined pulse code must start from it.
+//
+// Both ultrasonic tasks share one heartbeat pulse code; MsgSendPulse()'s
+// value parameter (landing in _pulse.value.sival_int on receipt) carries
+// which ULTRASONIC_ID sent it, so the supervisor doesn't need a separate
+// code per sensor.
 enum {
     PULSE_HEARTBEAT_ULTRASONIC = _PULSE_CODE_MINAVAIL,
     PULSE_HEARTBEAT_IMU,
     PULSE_SAFETY_TICK, // supervisor's own periodic safety-check timer
 };
+
+// Identifies which physical ultrasonic sensor a message/heartbeat came
+// from. ultrasonic_task-1 uses ULTRASONIC_ID_1, ultrasonic_task-2 uses
+// ULTRASONIC_ID_2.
+enum { ULTRASONIC_ID_1 = 0, ULTRASONIC_ID_2 = 1, ULTRASONIC_COUNT = 2 };
 
 // Message types for synchronous MsgSend()/MsgReceive()/MsgReply() traffic.
 // Every message starts with this header so the supervisor's receive loop
@@ -44,11 +54,12 @@ enum class SafetyEventType : uint8_t {
     OverrideEngaged, OverrideCleared
 };
 
-// ultrasonic_task -> supervisor
+// ultrasonic_task-1 / ultrasonic_task-2 -> supervisor
 struct UltrasonicMsg {
     MsgHeader    hdr;
     uint64_t     timestampNs; // CLOCK_MONOTONIC, captured right before send:
                               // the start point for the override-latency measurement
+    uint8_t      sensorId;    // ULTRASONIC_ID_1 or ULTRASONIC_ID_2
     SensorStatus status;
     float        distanceCm;
 };
@@ -86,9 +97,9 @@ struct CliStatusReply {
     SystemState state;
     uint8_t     overrideActive;
 
-    SensorHealth ultrasonicHealth;
-    float        lastDistanceCm;
-    uint64_t     ultrasonicAgeMs;
+    SensorHealth ultrasonicHealth[ULTRASONIC_COUNT];
+    float        lastDistanceCm[ULTRASONIC_COUNT];
+    uint64_t     ultrasonicAgeMs[ULTRASONIC_COUNT];
 
     SensorHealth imuHealth;
     float        lastAccelG[3];

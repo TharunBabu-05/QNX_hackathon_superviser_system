@@ -2,12 +2,13 @@
 //
 // It never touches hardware directly. Its only job is to sit on a QNX
 // message-passing channel, receive sensor data and heartbeats from
-// ultrasonic_task and imu_task, and turn that into a safety decision:
-// is the vehicle's environment being sensed reliably right now, and if
-// not, what should happen. That decision-making is deliberately kept in
-// its own process, isolated by the microkernel's address-space
-// separation from the sensor drivers -- a bug or hang in imu_task's I2C
-// code cannot corrupt this process's state or take it down with it.
+// ultrasonic_task-1, ultrasonic_task-2, and imu_task, and turn that into
+// a safety decision: is the vehicle's environment being sensed reliably
+// right now, and if not, what should happen. That decision-making is
+// deliberately kept in its own process, isolated by the microkernel's
+// address-space separation from the sensor drivers -- a bug or hang in
+// imu_task's I2C code cannot corrupt this process's state or take it
+// down with it.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,16 +64,22 @@ struct SubsystemState {
     SensorHealth dataHealth         = SensorHealth::Dead;
     uint64_t recoveryStartedNs      = 0; // 0 == not currently recovering
     unsigned respawnAttempts        = 0;
+    bool     hazard                 = false; // this sensor currently reports an obstacle
 };
 
-SubsystemState g_ultrasonic;
+// Indexed by ULTRASONIC_ID_1 / ULTRASONIC_ID_2.
+SubsystemState g_ultrasonic[ULTRASONIC_COUNT];
 SubsystemState g_imu;
 
-float g_lastDistanceCm    = -1.0f;
+float g_lastDistanceCm[ULTRASONIC_COUNT] = {-1.0f, -1.0f};
 float g_lastAccelG[3]     = {0, 0, 0};
 
 SystemState g_state       = SystemState::Recovery; // nothing has reported in yet
 bool        g_overrideActive = false;
+
+const char* ultrasonicName(uint8_t id) {
+    return (id == ULTRASONIC_ID_1) ? "ultrasonic_task-1" : "ultrasonic_task-2";
+}
 
 SafetyEvent g_events[MAX_EVENT_LOG];
 unsigned    g_eventHead  = 0;
@@ -112,41 +119,53 @@ void raisePriority() {
 
 // ---- Obstacle / override logic --------------------------------------------
 
-void checkObstacle(const UltrasonicMsg& m) {
-    if (m.status != SensorStatus::Connected) {
-        return; // no trustworthy distance to react to
-    }
+// Override is a single system-wide decision covering both ultrasonic
+// sensors: it engages the instant EITHER one sees an obstacle, and only
+// clears once BOTH report clear -- a vehicle with front and rear coverage
+// shouldn't ignore a rear hazard just because the front is clear.
+void updateOverride(uint8_t triggeringSensorId, uint64_t triggeringTimestampNs) {
+    const bool anyHazard = g_ultrasonic[ULTRASONIC_ID_1].hazard ||
+                           g_ultrasonic[ULTRASONIC_ID_2].hazard;
 
-    if (m.distanceCm < OBSTACLE_THRESHOLD_CM) {
-        // Override latency: elapsed time from when ultrasonic_task
-        // captured the reading to the moment this decision is made --
-        // the concrete number for the "Override Latency" requirement.
-        const double latencyMs = (monotonicNs() - m.timestampNs) / 1e6;
-        logEvent(SafetyEventType::Obstacle, m.distanceCm);
-        if (!g_overrideActive) {
-            g_overrideActive = true;
-            logEvent(SafetyEventType::OverrideEngaged, static_cast<float>(latencyMs));
-            printf("[OVERRIDE] obstacle at %.1fcm, latency %.3fms -- navigation "
-                   "commands would be suppressed here\n",
-                   m.distanceCm, latencyMs);
-        }
-    } else if (g_overrideActive) {
+    if (anyHazard && !g_overrideActive) {
+        g_overrideActive = true;
+        // Override latency: elapsed time from when the triggering sensor
+        // captured its reading to the moment this decision is made -- the
+        // concrete number for the "Override Latency" requirement.
+        const double latencyMs = (monotonicNs() - triggeringTimestampNs) / 1e6;
+        logEvent(SafetyEventType::OverrideEngaged, static_cast<float>(latencyMs));
+        printf("[OVERRIDE] engaged by %s, latency %.3fms -- navigation "
+               "commands would be suppressed here\n",
+               ultrasonicName(triggeringSensorId), latencyMs);
+    } else if (!anyHazard && g_overrideActive) {
         g_overrideActive = false;
-        logEvent(SafetyEventType::OverrideCleared, m.distanceCm);
-        printf("[OVERRIDE] cleared -- path clear at %.1fcm\n", m.distanceCm);
+        logEvent(SafetyEventType::OverrideCleared, 0.0f);
+        printf("[OVERRIDE] cleared -- both ultrasonic sensors report clear\n");
     }
 }
 
 // ---- Message handlers -------------------------------------------------
 
 void onUltrasonicReading(const UltrasonicMsg& m) {
-    g_ultrasonic.lastMsgNs = monotonicNs();
+    if (m.sensorId != ULTRASONIC_ID_1 && m.sensorId != ULTRASONIC_ID_2) {
+        return; // malformed sender -- ignore rather than index out of bounds
+    }
+    SubsystemState& s = g_ultrasonic[m.sensorId];
+    s.lastMsgNs = monotonicNs();
+
     if (m.status == SensorStatus::Connected) {
-        g_lastDistanceCm = m.distanceCm;
+        g_lastDistanceCm[m.sensorId] = m.distanceCm;
+        s.hazard = m.distanceCm < OBSTACLE_THRESHOLD_CM;
+        if (s.hazard) {
+            logEvent(SafetyEventType::Obstacle, m.distanceCm);
+        }
     } else {
         logEvent(SafetyEventType::SensorTimeout, m.distanceCm);
+        s.hazard = false; // an untrustworthy reading can't justify a hazard flag;
+                          // checkDeadline()/checkWatchdog() separately degrade
+                          // this sensor's health so it isn't silently trusted
     }
-    checkObstacle(m);
+    updateOverride(m.sensorId, m.timestampNs);
 }
 
 void onImuReading(const ImuMsg& m) {
@@ -163,9 +182,12 @@ CliStatusReply buildStatusReply() {
     r.state = g_state;
     r.overrideActive = g_overrideActive ? 1 : 0;
 
-    r.ultrasonicHealth = g_ultrasonic.processAlive ? g_ultrasonic.dataHealth : SensorHealth::Dead;
-    r.lastDistanceCm   = g_lastDistanceCm;
-    r.ultrasonicAgeMs  = g_ultrasonic.lastMsgNs ? (monotonicNs() - g_ultrasonic.lastMsgNs) / 1000000 : 0;
+    for (unsigned i = 0; i < ULTRASONIC_COUNT; ++i) {
+        const SubsystemState& s = g_ultrasonic[i];
+        r.ultrasonicHealth[i] = s.processAlive ? s.dataHealth : SensorHealth::Dead;
+        r.lastDistanceCm[i]   = g_lastDistanceCm[i];
+        r.ultrasonicAgeMs[i]  = s.lastMsgNs ? (monotonicNs() - s.lastMsgNs) / 1000000 : 0;
+    }
 
     r.imuHealth = g_imu.processAlive ? g_imu.dataHealth : SensorHealth::Dead;
     for (int i = 0; i < 3; ++i) r.lastAccelG[i] = g_lastAccelG[i];
@@ -233,11 +255,17 @@ void tryRecover(SubsystemState& s, const char* name, uint64_t now) {
 }
 
 void recomputeSystemState() {
+    const bool allProcessesAlive = g_ultrasonic[ULTRASONIC_ID_1].processAlive &&
+                                    g_ultrasonic[ULTRASONIC_ID_2].processAlive &&
+                                    g_imu.processAlive;
+    const bool allDataHealthy = g_ultrasonic[ULTRASONIC_ID_1].dataHealth == SensorHealth::Healthy &&
+                                 g_ultrasonic[ULTRASONIC_ID_2].dataHealth == SensorHealth::Healthy &&
+                                 g_imu.dataHealth == SensorHealth::Healthy;
+
     SystemState next;
-    if (!g_ultrasonic.processAlive || !g_imu.processAlive) {
+    if (!allProcessesAlive) {
         next = SystemState::SafeStop;
-    } else if (g_ultrasonic.dataHealth != SensorHealth::Healthy ||
-               g_imu.dataHealth != SensorHealth::Healthy) {
+    } else if (!allDataHealthy) {
         next = SystemState::Degraded;
     } else {
         next = SystemState::Normal;
@@ -249,11 +277,14 @@ void recomputeSystemState() {
 }
 
 void onSafetyTick(uint64_t now) {
-    checkWatchdog(g_ultrasonic, now, "ultrasonic_task");
+    checkWatchdog(g_ultrasonic[ULTRASONIC_ID_1], now, "ultrasonic_task-1");
+    checkWatchdog(g_ultrasonic[ULTRASONIC_ID_2], now, "ultrasonic_task-2");
     checkWatchdog(g_imu, now, "imu_task");
-    checkDeadline(g_ultrasonic, now, ULTRASONIC_DEADLINE_NS);
+    checkDeadline(g_ultrasonic[ULTRASONIC_ID_1], now, ULTRASONIC_DEADLINE_NS);
+    checkDeadline(g_ultrasonic[ULTRASONIC_ID_2], now, ULTRASONIC_DEADLINE_NS);
     checkDeadline(g_imu, now, IMU_DEADLINE_NS);
-    tryRecover(g_ultrasonic, "ultrasonic_task", now);
+    tryRecover(g_ultrasonic[ULTRASONIC_ID_1], "ultrasonic_task-1", now);
+    tryRecover(g_ultrasonic[ULTRASONIC_ID_2], "ultrasonic_task-2", now);
     tryRecover(g_imu, "imu_task", now);
     recomputeSystemState();
 }
@@ -270,9 +301,17 @@ union RecvMsg {
 
 void handlePulse(const struct _pulse& pulse, uint64_t now) {
     switch (pulse.code) {
-    case PULSE_HEARTBEAT_ULTRASONIC: onHeartbeat(g_ultrasonic, now, "ultrasonic_task"); break;
-    case PULSE_HEARTBEAT_IMU:        onHeartbeat(g_imu, now, "imu_task"); break;
-    case PULSE_SAFETY_TICK:          onSafetyTick(now); break;
+    case PULSE_HEARTBEAT_ULTRASONIC: {
+        // MsgSendPulse()'s value parameter carries which ultrasonic task
+        // sent this -- both share one pulse code (see protocol.h).
+        const int id = pulse.value.sival_int;
+        if (id == ULTRASONIC_ID_1 || id == ULTRASONIC_ID_2) {
+            onHeartbeat(g_ultrasonic[id], now, ultrasonicName(static_cast<uint8_t>(id)));
+        }
+        break;
+    }
+    case PULSE_HEARTBEAT_IMU: onHeartbeat(g_imu, now, "imu_task"); break;
+    case PULSE_SAFETY_TICK:   onSafetyTick(now); break;
     default: break;
     }
 }
@@ -335,8 +374,9 @@ int main() {
     raisePriority();
 
     // Registers this channel under SUPERVISOR_NAME in QNX's name-locator
-    // service so ultrasonic_task, imu_task, and cli_status can each find
-    // it with name_open() -- none of them need to know this process's pid.
+    // service so ultrasonic_task-1, ultrasonic_task-2, imu_task, and
+    // cli_status can each find it with name_open() -- none of them need
+    // to know this process's pid.
     name_attach_t* attach = name_attach(nullptr, SUPERVISOR_NAME, 0);
     if (!attach) {
         perror("name_attach failed");

@@ -48,9 +48,12 @@ void printStatus(const CliStatusReply& r) {
     printf("=== Safety Supervisor Status ===\n");
     printf("System State : %s\n", stateName(r.state));
     printf("Override     : %s\n", r.overrideActive ? "ACTIVE" : "inactive");
-    printf("Ultrasonic   : %-8s | last=%.1fcm, age=%llums\n",
-           healthName(r.ultrasonicHealth), r.lastDistanceCm,
-           static_cast<unsigned long long>(r.ultrasonicAgeMs));
+    printf("Ultrasonic-1 : %-8s | last=%.1fcm, age=%llums\n",
+           healthName(r.ultrasonicHealth[ULTRASONIC_ID_1]), r.lastDistanceCm[ULTRASONIC_ID_1],
+           static_cast<unsigned long long>(r.ultrasonicAgeMs[ULTRASONIC_ID_1]));
+    printf("Ultrasonic-2 : %-8s | last=%.1fcm, age=%llums\n",
+           healthName(r.ultrasonicHealth[ULTRASONIC_ID_2]), r.lastDistanceCm[ULTRASONIC_ID_2],
+           static_cast<unsigned long long>(r.ultrasonicAgeMs[ULTRASONIC_ID_2]));
     printf("IMU          : %-8s | accel=(%.2f,%.2f,%.2f)g, age=%llums\n",
            healthName(r.imuHealth), r.lastAccelG[0], r.lastAccelG[1], r.lastAccelG[2],
            static_cast<unsigned long long>(r.imuAgeMs));

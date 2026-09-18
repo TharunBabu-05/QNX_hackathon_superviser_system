@@ -1,10 +1,12 @@
 */nto/*/o*/*.o
 */nto/*/o*/*.dep
-*/nto/aarch64/o-le/ultrasonic_task
+*/nto/aarch64/o-le/ultrasonic_task-1
+*/nto/aarch64/o-le/ultrasonic_task-2
 */nto/aarch64/o-le/imu_task
 */nto/aarch64/o-le/supervisor
 */nto/aarch64/o-le/cli_status
-*/nto/x86_64/o/ultrasonic_task
+*/nto/x86_64/o/ultrasonic_task-1
+*/nto/x86_64/o/ultrasonic_task-2
 */nto/x86_64/o/imu_task
 */nto/x86_64/o/supervisor
 */nto/x86_64/o/cli_status

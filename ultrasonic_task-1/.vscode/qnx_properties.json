@@ -1,8 +1,8 @@
 {
   "version": 1,
   "template": {
-    "projectId": "ultrasonic_task",
-    "artifactName": "ultrasonic_task",
+    "projectId": "ultrasonic_task-1",
+    "artifactName": "ultrasonic_task-1",
     "buildType": "QnxRecMake",
     "language": "cpp",
     "archlist": "x86_64,aarch64le",

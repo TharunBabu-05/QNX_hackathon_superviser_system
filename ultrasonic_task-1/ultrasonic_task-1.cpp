@@ -15,6 +15,10 @@ namespace {
 constexpr unsigned TRIG_PIN = 23;
 constexpr unsigned ECHO_PIN = 24;
 
+// Identifies this sensor to the supervisor, since ultrasonic_task-2 sends
+// the same message types on the same channel.
+constexpr uint8_t SENSOR_ID = ULTRASONIC_ID_1;
+
 // HC-SR04 needs >=60ms of quiet between pings or the previous echo can
 // still be arriving when the next trigger fires.
 constexpr unsigned SAMPLE_PERIOD_MS = 100;
@@ -42,7 +46,7 @@ bool connectToSupervisor() {
 // sampling loop, and the supervisor's receive loop.
 void* heartbeatThread(void*) {
     for (;;) {
-        MsgSendPulse(g_supervisorCoid, -1, PULSE_HEARTBEAT_ULTRASONIC, 0);
+        MsgSendPulse(g_supervisorCoid, -1, PULSE_HEARTBEAT_ULTRASONIC, SENSOR_ID);
         usleep(HEARTBEAT_PERIOD_MS * 1000);
     }
     return nullptr;
@@ -92,6 +96,7 @@ int main() {
         UltrasonicMsg msg{};
         msg.hdr.type = MsgType::UltrasonicReading;
         msg.timestampNs = monotonicNs(); // start of the override-latency clock
+        msg.sensorId = SENSOR_ID;
         msg.status = r.status;
         msg.distanceCm = r.distanceCm;
 

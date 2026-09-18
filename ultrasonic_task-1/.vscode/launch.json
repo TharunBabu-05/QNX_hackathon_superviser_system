@@ -4,10 +4,10 @@
     {
       "type": "qnx-gdb",
       "request": "launch",
-      "name": "QNX: ultrasonic_task",
+      "name": "QNX: ultrasonic_task-1",
       "gdb": "gdb",
       "program": "${command:qnx.autodetectBinary}",
-      "remotePath": "ultrasonic_task",
+      "remotePath": "ultrasonic_task-1",
       "qnxtarget": "default",
       "upload": true,
       "stopAtEntry": true,

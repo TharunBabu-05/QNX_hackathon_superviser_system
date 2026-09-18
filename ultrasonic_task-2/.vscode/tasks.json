@@ -3,7 +3,7 @@
 	"tasks": [
 		{
 			"type": "shell",
-			"label": "QNX: build debug",
+			"label": "QNX(ultrasonic_task-2): build debug",
 			"command": "make DEBUG=-g OPTIMIZE_TYPE=NONE",
 			"options": {
 				"cwd": "${workspaceFolder}",
@@ -24,7 +24,7 @@
 		},
 		{
 			"type": "shell",
-			"label": "QNX: install",
+			"label": "QNX(ultrasonic_task-2): install",
 			"command": "make INSTALL_ROOT_nto=${config:qnx.installRoot}/nto USE_INSTALL_ROOT=1 hinstall install",
 			"options": {
 				"cwd": "${workspaceFolder}",
@@ -45,7 +45,7 @@
 		},
 		{
 			"type": "shell",
-			"label": "QNX: clean",
+			"label": "QNX(ultrasonic_task-2): clean",
 			"command": "make clean",
 			"options": {
 				"cwd": "${workspaceFolder}",
@@ -66,7 +66,7 @@
 		},
 		{
 			"type": "shell",
-			"label": "QNX: build",
+			"label": "QNX(ultrasonic_task-2): build",
 			"command": "make",
 			"options": {
 				"cwd": "${workspaceFolder}",

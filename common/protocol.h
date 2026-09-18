@@ -35,6 +35,15 @@ enum { ULTRASONIC_ID_1 = 0, ULTRASONIC_ID_2 = 1, ULTRASONIC_COUNT = 2 };
 // came from a specific sensor or from a combined system-wide decision.
 enum { SOURCE_IMU = 2, SOURCE_SYSTEM = 3 };
 
+// HC-SR04 datasheet physical range. A real driver (see ultrasonic.cpp)
+// never reports SensorStatus::Connected outside this window -- it reports
+// OutOfRange instead. So the supervisor can treat "Connected" paired with
+// a distance outside this range as proof the reading did not come from a
+// real echo at all (a stuck/corrupted sensor, or injected fault data),
+// not just an unusually near/far obstacle.
+constexpr float ULTRASONIC_PHYSICAL_MIN_CM = 2.0f;
+constexpr float ULTRASONIC_PHYSICAL_MAX_CM = 400.0f;
+
 // Message types for synchronous MsgSend()/MsgReceive()/MsgReply() traffic.
 // Every message starts with this header so the supervisor's receive loop
 // can dispatch on hdr.type before interpreting the rest of the buffer.
@@ -56,7 +65,8 @@ enum class SensorHealth    : uint8_t { Healthy, Degraded, Dead };
 enum class SystemState     : uint8_t { Normal, Degraded, SafeStop, Recovery };
 enum class SafetyEventType : uint8_t {
     Obstacle, SensorTimeout, ProcessDead, ProcessRecovered,
-    OverrideEngaged, OverrideCleared
+    OverrideEngaged, OverrideCleared,
+    AnomalyDetected // a reading claimed valid but was physically impossible
 };
 
 // ultrasonic_task-1 / ultrasonic_task-2 -> supervisor

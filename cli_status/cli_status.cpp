@@ -40,6 +40,7 @@ const char* eventName(SafetyEventType t) {
     case SafetyEventType::ProcessRecovered: return "PROCESS_RECOVERED";
     case SafetyEventType::OverrideEngaged:  return "OVERRIDE_ENGAGED";
     case SafetyEventType::OverrideCleared:  return "OVERRIDE_CLEARED";
+    case SafetyEventType::AnomalyDetected:  return "ANOMALY_DETECTED";
     }
     return "?";
 }

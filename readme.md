@@ -104,10 +104,10 @@ stateDiagram-v2
 | 🐕 **Watchdog** | `supervisor.cpp::checkWatchdog` | ~5 missed heartbeats → process declared dead, logged, state transitions |
 | ⏱️ **Safety Deadline** | `supervisor.cpp::checkDeadline` | Data older than 300ms is untrusted even if the process is alive — a *different* failure mode than a dead process |
 | ⏲️ **Recovery Timer** | `supervisor.cpp::tryRecover` | 2s grace period, bounded to 3 logged attempts, then quiet in `SAFE_STOP` for a human |
-| 🛡️ **Fault Tolerance** | driver + supervisor | `SensorStatus{Connected,Disconnected,OutOfRange}` classification feeds directly into health/state logic |
+| 🛡️ **Fault Tolerance** | driver + supervisor | `SensorStatus{Connected,Disconnected,OutOfRange}` classification, **plus** a plausibility check: a `Connected` reading outside the HC-SR04's physical 2–400cm range can't be a real echo, so it's logged as `AnomalyDetected` and forces override — not treated as an ordinary obstacle |
 | 🚨 **Priority Override** | `supervisor.cpp::raisePriority` | Runs `SCHED_FIFO` at the system's max priority — always preempts sensor tasks, by the scheduler, not by convention |
 | ⚡ **Override Latency** | `supervisor.cpp::updateOverride` | Measured end-to-end: sensor's `CLOCK_MONOTONIC` capture → supervisor's decision, in ms |
-| 📋 **Safety Events** | 16-entry ring buffer | `Obstacle`, `SensorTimeout`, `ProcessDead/Recovered`, `OverrideEngaged/Cleared` |
+| 📋 **Safety Events** | 16-entry ring buffer | `Obstacle`, `SensorTimeout`, `ProcessDead/Recovered`, `OverrideEngaged/Cleared`, `AnomalyDetected` — every entry tagged with its source (`US1`/`US2`/`IMU`/`SYS`) and a snapshot of both ultrasonic distances at that instant |
 | 💚 **Health Status** | per-subsystem + overall | `SensorHealth{Healthy,Degraded,Dead}` × 3 subsystems, rolled up into one `SystemState` |
 | 🖥️ **CLI (mandatory)** | `cli_status` | `./cli_status` for one snapshot, `./cli_status --watch` to poll live — read-only, cannot influence the control path |
 
@@ -148,10 +148,11 @@ hello/
 ├── ultrasonic_task-2/      # HC-SR04 #2: same driver, different pins + sensor id
 ├── imu_task/               # MPU6500 over /dev/i2c1: mpu6500.{h,cpp}, imu_task.cpp
 ├── supervisor/             # the safety state machine — supervisor.cpp
-└── cli_status/             # read-only status client — cli_status.cpp
+├── cli_status/             # read-only status client — cli_status.cpp
+└── fault_injector/         # optional 6th tool — proves Fault Tolerance/Recovery live, see below
 ```
 
-Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`/`nto/`), building independent `aarch64le` + `x86_64` executables — five binaries, five processes, matching the diagram above exactly.
+Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`/`nto/`), building independent `aarch64le` + `x86_64` executables — six binaries total; the first five are the always-on system, `fault_injector` is a demo/test tool you run on demand.
 
 ---
 
@@ -174,10 +175,11 @@ scp -o MACs=hmac-sha2-256 \
     imu_task/nto/aarch64/o-le/imu_task \
     supervisor/nto/aarch64/o-le/supervisor \
     cli_status/nto/aarch64/o-le/cli_status \
+    fault_injector/nto/aarch64/o-le/fault_injector \
     qnxuser@<PI_IP>:/tmp/
 
 # 2. on the Pi
-cd /tmp && chmod +x ultrasonic_task-1 ultrasonic_task-2 imu_task supervisor cli_status
+cd /tmp && chmod +x ultrasonic_task-1 ultrasonic_task-2 imu_task supervisor cli_status fault_injector
 ```
 
 Five terminals, **foreground**, in this order (GPIO access needs root; I²C doesn't):
@@ -194,15 +196,38 @@ Five terminals, **foreground**, in this order (GPIO access needs root; I²C does
 
 ```
 === Safety Supervisor Status ===
-System State : NORMAL
-Override     : inactive
+System State : DEGRADED
+Override     : ACTIVE
 Ultrasonic-1 : HEALTHY  | last=134.2cm, age=42ms
 Ultrasonic-2 : HEALTHY  | last=87.6cm, age=38ms
-IMU          : HEALTHY  | accel=(0.01,-0.02,0.99)g, age=21ms
-Recent Safety Events (2):
-  [t=104213ms] OBSTACLE           value=14.30
-  [t=104213ms] OVERRIDE_ENGAGED   value=1.42
+IMU          : HEALTHY  | accel=(0.01,-0.02,0.03)g, age=21ms
+Recent Safety Events (3):
+  [t=104213ms] OBSTACLE           src=US1 value= 14.30 | US1=  14.3cm US2=  87.6cm
+  [t=104213ms] OVERRIDE_ENGAGED   src=US1 value=  1.42 | US1=  14.3cm US2=  87.6cm
+  [t=118990ms] ANOMALY_DETECTED   src=US2 value=5000.00 | US1= 134.2cm US2=5000.0cm
 ```
+
+Every event line names **which subsystem** caused it (`src=US1/US2/IMU/SYS`) and shows **both** ultrasonic readings at that instant, not just the one that fired — so a judge reading the log can tell an obstacle in front from a fault at the rear without guessing. IMU accel settles near `(0,0,0)` at rest: `imu_task` calibrates out gravity/bias against ~50 stationary samples at startup, then applies a light exponential smoothing filter, so this number reflects real motion, not sensor tilt.
+
+---
+
+## 🧪 Fault injection demo (the 6th terminal)
+
+The problem statement's exact wording is: *"The supervisor must override unsafe commands and place the vehicle in a safe state within a defined deadline."* Concretely, in this project that means two separate things `fault_injector` lets you trigger and watch on demand:
+
+1. **Override an unsafe command** → `overrideActive` flips to `ACTIVE` the instant any sensor reports a hazard (an obstacle *or* a reading that can't physically be real), and a real navigation task would have its commands vetoed while this is true.
+2. **Safe state within a deadline** → the state machine drops out of `NORMAL` the same tick the hazard is detected (well under the 50ms safety-tick period), not after some polling delay — that bound *is* the deadline.
+
+`fault_injector` doesn't touch the real sensor — it runs **alongside** `ultrasonic_task-1`/`-2` and sends the supervisor a reading no real HC-SR04 echo could produce (e.g. 5000cm, outside the 2–400cm physical range) for whichever sensor you pick. The supervisor can't tell that apart from a genuinely stuck/corrupted sensor, which is the point: it's a fault, not a false obstacle, so it's logged as `ANOMALY_DETECTED`, not `OBSTACLE`.
+
+```bash
+# terminal F, while A-E above are already running:
+./fault_injector 1          # inject a fake fault into ultrasonic-1 (or `2` for the other sensor)
+```
+
+Watch terminal E (`cli_status --watch`): `Ultrasonic-1` flips to `DEAD`, `System State` drops to `DEGRADED`, `Override` flips to `ACTIVE`, and an `ANOMALY_DETECTED` line appears in the event log — all within one safety tick.
+
+**Recovery is automatic, not a reboot.** Press Ctrl+C on `fault_injector`; the real `ultrasonic_task-1` is still running underneath and its very next genuine reading clears the fault on its own — `Ultrasonic-1` goes back to `HEALTHY`, override clears once both sensors report clear, and `System State` returns to `NORMAL`. Nothing needs to be restarted or rebooted for this demo: the recovery path is the software noticing good data has resumed, which is both faster to show live and closer to how a real fault-tolerant system should behave (a transient bad reading shouldn't require a power cycle).
 
 ---
 

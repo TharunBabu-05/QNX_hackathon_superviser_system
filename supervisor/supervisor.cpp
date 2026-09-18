@@ -65,6 +65,13 @@ struct SubsystemState {
     uint64_t recoveryStartedNs      = 0; // 0 == not currently recovering
     unsigned respawnAttempts        = 0;
     bool     hazard                 = false; // this sensor currently reports an obstacle
+    // Latched by onUltrasonicReading() when a reading is physically
+    // impossible, cleared only once a plausible reading arrives again.
+    // Kept separate from dataHealth because checkDeadline() recomputes
+    // dataHealth from message freshness every tick and would otherwise
+    // stomp this back to Healthy within one tick even while the fault
+    // injector is still actively sending bad data on schedule.
+    bool     dataFault              = false;
 };
 
 // Indexed by ULTRASONIC_ID_1 / ULTRASONIC_ID_2.
@@ -160,8 +167,25 @@ void onUltrasonicReading(const UltrasonicMsg& m) {
     SubsystemState& s = g_ultrasonic[m.sensorId];
     s.lastMsgNs = monotonicNs();
 
-    if (m.status == SensorStatus::Connected) {
+    if (m.status == SensorStatus::Connected &&
+        (m.distanceCm < ULTRASONIC_PHYSICAL_MIN_CM || m.distanceCm > ULTRASONIC_PHYSICAL_MAX_CM)) {
+        // A real HC-SR04 driver never claims Connected outside its physical
+        // range -- it reports OutOfRange instead (see ultrasonic.cpp). A
+        // Connected reading out here can only be corrupted/injected data,
+        // not a real echo, so this is a sensor fault, not an obstacle: stop
+        // trusting this sensor's distance and force the override on, the
+        // same as a genuine obstacle would, rather than acting on a number
+        // that cannot be real.
         g_lastDistanceCm[m.sensorId] = m.distanceCm;
+        s.dataFault = true;
+        s.hazard = true;
+        logEvent(SafetyEventType::AnomalyDetected, m.sensorId, m.distanceCm);
+        printf("[ANOMALY] %s reported an impossible reading (%.1fcm) -- "
+               "treating sensor as faulty, forcing override\n",
+               ultrasonicName(m.sensorId), m.distanceCm);
+    } else if (m.status == SensorStatus::Connected) {
+        g_lastDistanceCm[m.sensorId] = m.distanceCm;
+        s.dataFault = false; // a plausible reading is this sensor clearing its own fault
         s.hazard = m.distanceCm < OBSTACLE_THRESHOLD_CM;
         if (s.hazard) {
             logEvent(SafetyEventType::Obstacle, m.sensorId, m.distanceCm);
@@ -191,7 +215,9 @@ CliStatusReply buildStatusReply() {
 
     for (unsigned i = 0; i < ULTRASONIC_COUNT; ++i) {
         const SubsystemState& s = g_ultrasonic[i];
-        r.ultrasonicHealth[i] = s.processAlive ? s.dataHealth : SensorHealth::Dead;
+        r.ultrasonicHealth[i] = !s.processAlive ? SensorHealth::Dead
+                               : s.dataFault     ? SensorHealth::Dead
+                                                  : s.dataHealth;
         r.lastDistanceCm[i]   = g_lastDistanceCm[i];
         r.ultrasonicAgeMs[i]  = s.lastMsgNs ? (monotonicNs() - s.lastMsgNs) / 1000000 : 0;
     }
@@ -266,7 +292,9 @@ void recomputeSystemState() {
                                     g_ultrasonic[ULTRASONIC_ID_2].processAlive &&
                                     g_imu.processAlive;
     const bool allDataHealthy = g_ultrasonic[ULTRASONIC_ID_1].dataHealth == SensorHealth::Healthy &&
+                                 !g_ultrasonic[ULTRASONIC_ID_1].dataFault &&
                                  g_ultrasonic[ULTRASONIC_ID_2].dataHealth == SensorHealth::Healthy &&
+                                 !g_ultrasonic[ULTRASONIC_ID_2].dataFault &&
                                  g_imu.dataHealth == SensorHealth::Healthy;
 
     SystemState next;

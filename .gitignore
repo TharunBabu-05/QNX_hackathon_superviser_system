@@ -1,0 +1,4 @@
+nto/*/o*/*.o
+nto/*/o*/*.dep
+nto/aarch64/o-le/hello
+nto/x86_64/o/hello

@@ -30,6 +30,11 @@ enum {
 // ULTRASONIC_ID_2.
 enum { ULTRASONIC_ID_1 = 0, ULTRASONIC_ID_2 = 1, ULTRASONIC_COUNT = 2 };
 
+// Which subsystem a SafetyEvent is about. Ultrasonic sources reuse
+// ULTRASONIC_ID_1/_2 so one field means the same thing whether the event
+// came from a specific sensor or from a combined system-wide decision.
+enum { SOURCE_IMU = 2, SOURCE_SYSTEM = 3 };
+
 // Message types for synchronous MsgSend()/MsgReceive()/MsgReply() traffic.
 // Every message starts with this header so the supervisor's receive loop
 // can dispatch on hdr.type before interpreting the rest of the buffer.
@@ -89,7 +94,13 @@ constexpr unsigned MAX_EVENT_LOG = 16;
 struct SafetyEvent {
     uint64_t        timestampNs;
     SafetyEventType type;
-    float           value; // context-dependent: distanceCm, latencyMs, ...
+    uint8_t         source; // ULTRASONIC_ID_1/_2, SOURCE_IMU, or SOURCE_SYSTEM
+    float           value;  // context-dependent: distanceCm, latencyMs, ...
+    // Snapshot of both ultrasonic sensors at the moment of this event, so
+    // an obstacle/override entry shows full context, not just whichever
+    // sensor triggered it.
+    float           ultrasonic1Cm;
+    float           ultrasonic2Cm;
 };
 
 // supervisor's reply to CliStatusRequest.

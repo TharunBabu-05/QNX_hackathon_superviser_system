@@ -44,6 +44,15 @@ const char* eventName(SafetyEventType t) {
     return "?";
 }
 
+const char* sourceName(uint8_t source) {
+    switch (source) {
+    case ULTRASONIC_ID_1: return "US1";
+    case ULTRASONIC_ID_2: return "US2";
+    case SOURCE_IMU:      return "IMU";
+    default:              return "SYS";
+    }
+}
+
 void printStatus(const CliStatusReply& r) {
     printf("=== Safety Supervisor Status ===\n");
     printf("System State : %s\n", stateName(r.state));
@@ -60,9 +69,10 @@ void printStatus(const CliStatusReply& r) {
     printf("Recent Safety Events (%u):\n", r.eventCount);
     for (unsigned i = 0; i < r.eventCount; ++i) {
         const SafetyEvent& e = r.events[i];
-        printf("  [t=%llums] %-18s value=%.2f\n",
+        printf("  [t=%llums] %-18s src=%-3s value=%6.2f | US1=%6.1fcm US2=%6.1fcm\n",
                static_cast<unsigned long long>(e.timestampNs / 1000000),
-               eventName(e.type), e.value);
+               eventName(e.type), sourceName(e.source), e.value,
+               e.ultrasonic1Cm, e.ultrasonic2Cm);
     }
     printf("\n");
 }

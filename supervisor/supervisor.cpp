@@ -95,8 +95,15 @@ const char* stateName(SystemState s) {
     return "?";
 }
 
-void logEvent(SafetyEventType type, float value) {
-    g_events[g_eventHead] = { monotonicNs(), type, value };
+// Every event records which subsystem it's about (source) plus a snapshot
+// of both ultrasonic sensors at that instant, so an obstacle/override
+// entry in the log shows full context instead of just whichever sensor
+// happened to trigger it.
+void logEvent(SafetyEventType type, uint8_t source, float value) {
+    g_events[g_eventHead] = {
+        monotonicNs(), type, source, value,
+        g_lastDistanceCm[ULTRASONIC_ID_1], g_lastDistanceCm[ULTRASONIC_ID_2]
+    };
     g_eventHead = (g_eventHead + 1) % MAX_EVENT_LOG;
     if (g_eventCount < MAX_EVENT_LOG) g_eventCount++;
 }
@@ -133,13 +140,13 @@ void updateOverride(uint8_t triggeringSensorId, uint64_t triggeringTimestampNs) 
         // captured its reading to the moment this decision is made -- the
         // concrete number for the "Override Latency" requirement.
         const double latencyMs = (monotonicNs() - triggeringTimestampNs) / 1e6;
-        logEvent(SafetyEventType::OverrideEngaged, static_cast<float>(latencyMs));
+        logEvent(SafetyEventType::OverrideEngaged, triggeringSensorId, static_cast<float>(latencyMs));
         printf("[OVERRIDE] engaged by %s, latency %.3fms -- navigation "
                "commands would be suppressed here\n",
                ultrasonicName(triggeringSensorId), latencyMs);
     } else if (!anyHazard && g_overrideActive) {
         g_overrideActive = false;
-        logEvent(SafetyEventType::OverrideCleared, 0.0f);
+        logEvent(SafetyEventType::OverrideCleared, SOURCE_SYSTEM, 0.0f);
         printf("[OVERRIDE] cleared -- both ultrasonic sensors report clear\n");
     }
 }
@@ -157,10 +164,10 @@ void onUltrasonicReading(const UltrasonicMsg& m) {
         g_lastDistanceCm[m.sensorId] = m.distanceCm;
         s.hazard = m.distanceCm < OBSTACLE_THRESHOLD_CM;
         if (s.hazard) {
-            logEvent(SafetyEventType::Obstacle, m.distanceCm);
+            logEvent(SafetyEventType::Obstacle, m.sensorId, m.distanceCm);
         }
     } else {
-        logEvent(SafetyEventType::SensorTimeout, m.distanceCm);
+        logEvent(SafetyEventType::SensorTimeout, m.sensorId, m.distanceCm);
         s.hazard = false; // an untrustworthy reading can't justify a hazard flag;
                           // checkDeadline()/checkWatchdog() separately degrade
                           // this sensor's health so it isn't silently trusted
@@ -173,7 +180,7 @@ void onImuReading(const ImuMsg& m) {
     if (m.valid) {
         for (int i = 0; i < 3; ++i) g_lastAccelG[i] = m.accelG[i];
     } else {
-        logEvent(SafetyEventType::SensorTimeout, 0.0f);
+        logEvent(SafetyEventType::SensorTimeout, SOURCE_IMU, 0.0f);
     }
 }
 
@@ -203,24 +210,24 @@ CliStatusReply buildStatusReply() {
 
 // ---- Watchdog / safety deadline / recovery --------------------------------
 
-void onHeartbeat(SubsystemState& s, uint64_t now, const char* name) {
+void onHeartbeat(SubsystemState& s, uint64_t now, uint8_t source, const char* name) {
     s.lastHeartbeatNs = now;
     if (!s.processAlive) {
         s.processAlive = true;
         s.recoveryStartedNs = 0;
         s.respawnAttempts = 0;
-        logEvent(SafetyEventType::ProcessRecovered, 0.0f);
+        logEvent(SafetyEventType::ProcessRecovered, source, 0.0f);
         printf("[WATCHDOG] %s heartbeat (re)established\n", name);
     }
 }
 
-void checkWatchdog(SubsystemState& s, uint64_t now, const char* name) {
+void checkWatchdog(SubsystemState& s, uint64_t now, uint8_t source, const char* name) {
     if (s.lastHeartbeatNs == 0) return; // never connected yet -- still starting up
     const uint64_t age = now - s.lastHeartbeatNs;
     if (age > HEARTBEAT_TIMEOUT_NS && s.processAlive) {
         s.processAlive = false;
         s.recoveryStartedNs = now;
-        logEvent(SafetyEventType::ProcessDead, static_cast<float>(age / 1e6));
+        logEvent(SafetyEventType::ProcessDead, source, static_cast<float>(age / 1e6));
         printf("[WATCHDOG] %s missed heartbeat for %.0fms -- declaring dead, "
                "starting recovery timer\n", name, age / 1e6);
     }
@@ -277,9 +284,9 @@ void recomputeSystemState() {
 }
 
 void onSafetyTick(uint64_t now) {
-    checkWatchdog(g_ultrasonic[ULTRASONIC_ID_1], now, "ultrasonic_task-1");
-    checkWatchdog(g_ultrasonic[ULTRASONIC_ID_2], now, "ultrasonic_task-2");
-    checkWatchdog(g_imu, now, "imu_task");
+    checkWatchdog(g_ultrasonic[ULTRASONIC_ID_1], now, ULTRASONIC_ID_1, "ultrasonic_task-1");
+    checkWatchdog(g_ultrasonic[ULTRASONIC_ID_2], now, ULTRASONIC_ID_2, "ultrasonic_task-2");
+    checkWatchdog(g_imu, now, SOURCE_IMU, "imu_task");
     checkDeadline(g_ultrasonic[ULTRASONIC_ID_1], now, ULTRASONIC_DEADLINE_NS);
     checkDeadline(g_ultrasonic[ULTRASONIC_ID_2], now, ULTRASONIC_DEADLINE_NS);
     checkDeadline(g_imu, now, IMU_DEADLINE_NS);
@@ -306,11 +313,12 @@ void handlePulse(const struct _pulse& pulse, uint64_t now) {
         // sent this -- both share one pulse code (see protocol.h).
         const int id = pulse.value.sival_int;
         if (id == ULTRASONIC_ID_1 || id == ULTRASONIC_ID_2) {
-            onHeartbeat(g_ultrasonic[id], now, ultrasonicName(static_cast<uint8_t>(id)));
+            onHeartbeat(g_ultrasonic[id], now, static_cast<uint8_t>(id),
+                        ultrasonicName(static_cast<uint8_t>(id)));
         }
         break;
     }
-    case PULSE_HEARTBEAT_IMU: onHeartbeat(g_imu, now, "imu_task"); break;
+    case PULSE_HEARTBEAT_IMU: onHeartbeat(g_imu, now, SOURCE_IMU, "imu_task"); break;
     case PULSE_SAFETY_TICK:   onSafetyTick(now); break;
     default: break;
     }

@@ -82,20 +82,30 @@ bool queryStatus(int coid, CliStatusReply& out) {
 }
 
 int main(int argc, char** argv) {
-    // GPIO0/1 is a different physical I2C controller than the one
-    // imu_task uses -- which /dev/i2cN node it shows up as depends on
-    // this board's QNX startup config, not something guessable from
-    // here. Defaults to /dev/i2c0 (the conventional node for that bus);
-    // override with `oled_task /dev/i2cN` if that's wrong on this Pi.
-    const char* i2cPath = (argc > 1) ? argv[1] : "/dev/i2c0";
+    // Originally wired to GPIO0/1 (I2C0, the ID_SD/ID_SC bus), which a
+    // full-bus scan showed doesn't work: unlike GPIO2/3, the Pi doesn't
+    // put pull-up resistors on those pins (they're reserved for HAT EEPROM
+    // detection, which supplies its own), so SDA/SCL just float with
+    // nothing wired there to pull them up. Now shares imu_task's GPIO2/3
+    // bus (/dev/i2c1) instead -- I2C is a multi-drop bus, so the OLED
+    // (0x3C) and MPU6500 (0x68) coexist on the same two wires without
+    // conflict. Still an argument, not hardcoded, in case this Pi's wiring
+    // changes again.
+    const char* i2cPath = (argc > 1) ? argv[1] : "/dev/i2c1";
+    // Most SSD1306 boards ACK at 0x3C; some (often ones silkscreened
+    // "0.91in") use 0x3D instead. Overridable so that can be tried without
+    // a rebuild: `oled_task /dev/i2c1 0x3D`.
+    const uint8_t i2cAddr = (argc > 2) ? static_cast<uint8_t>(strtoul(argv[2], nullptr, 0)) : 0x3C;
 
     Ssd1306 oled;
-    printf("Checking SSD1306 OLED connection (SDA=GPIO0, SCL=GPIO1, %s)...\n", i2cPath);
-    if (!oled.connect(i2cPath)) {
+    printf("Checking SSD1306 OLED connection (SDA=GPIO2, SCL=GPIO3, shared with IMU, %s @ 0x%02X)...\n",
+           i2cPath, i2cAddr);
+    if (!oled.connect(i2cPath, i2cAddr)) {
         fprintf(stderr,
-                "OLED not detected on %s -- check wiring/power, or pass the "
-                "correct device path as an argument (see `ls /dev/i2c*` on the Pi)\n",
-                i2cPath);
+                "OLED not detected on %s @ 0x%02X -- check wiring/power, try "
+                "the other common address (`oled_task %s 0x3D`), or pass a "
+                "different device path (see `ls /dev/i2c*` on the Pi)\n",
+                i2cPath, i2cAddr, i2cPath);
         return EXIT_FAILURE;
     }
     printf("OLED connected.\n");

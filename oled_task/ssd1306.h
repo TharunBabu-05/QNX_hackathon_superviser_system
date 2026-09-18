@@ -5,13 +5,16 @@
 #include <cstddef>
 
 // Driver for an SSD1306 128x64 I2C OLED, wired as:
-//   SDA -> GPIO0 / physical pin 27 (Raspberry Pi's I2C0/ID_SD bus)
-//   SCL -> GPIO1 / physical pin 28
-// This is a different physical I2C controller than the one imu_task uses
-// (MPU6500 is on GPIO2/3, I2C1) -- so this driver takes its device path
-// as a parameter rather than hardcoding it: whether that bus shows up as
-// /dev/i2c0 or something else depends on this board's QNX startup config,
-// which isn't something a driver can discover on its own.
+//   SDA -> GPIO2 / physical pin 3 (shared with the MPU6500, Raspberry
+//          Pi's I2C1 bus)
+//   SCL -> GPIO3 / physical pin 5
+// Originally wired to GPIO0/1 (I2C0), but a full-bus scan found nothing
+// responds there -- unlike GPIO2/3, the Pi doesn't supply pull-up
+// resistors on those pins (they're reserved for HAT EEPROM detection),
+// so SDA/SCL just float. Sharing imu_task's bus works because I2C is
+// multi-drop: the OLED (0x3C) and MPU6500 (0x68) coexist on the same two
+// wires at different addresses. The device path is still a parameter
+// rather than hardcoded, in case the wiring changes again.
 class Ssd1306 {
 public:
     static constexpr unsigned WIDTH  = 128;

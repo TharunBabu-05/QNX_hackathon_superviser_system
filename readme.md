@@ -45,7 +45,7 @@ flowchart TB
     HC1["HC-SR04 #1<br/>TRIG=GPIO23 (pin16)<br/>ECHO=GPIO24 (pin18)"]:::hw
     HC2["HC-SR04 #2<br/>TRIG=GPIO25 (pin22)<br/>ECHO=GPIO8 (pin24)"]:::hw
     IMUHW["MPU6500<br/>SDA=GPIO2 (pin3)<br/>SCL=GPIO3 (pin5)"]:::hw
-    OLEDHW["SSD1306 OLED<br/>SDA=GPIO0 (pin27)<br/>SCL=GPIO1 (pin28)"]:::hw
+    OLEDHW["SSD1306 OLED<br/>SDA=GPIO2 (pin3)<br/>SCL=GPIO3 (pin5)<br/><sub>shares the IMU's bus</sub>"]:::hw
 
     U1["ultrasonic_task-1<br/><sub>mmap_device_memory GPIO</sub>"]:::proc
     U2["ultrasonic_task-2<br/><sub>mmap_device_memory GPIO</sub>"]:::proc
@@ -138,8 +138,8 @@ Two ultrasonic sensors means one nuance worth stating explicitly: **override eng
 | **MPU6500** | SDA | GPIO2 | 3 |
 | | SCL | GPIO3 | 5 |
 | | INT ‡ | GPIO17 | 11 |
-| **SSD1306 OLED** | SDA | GPIO0 § | 27 |
-| | SCL | GPIO1 § | 28 |
+| **SSD1306 OLED** | SDA | GPIO2 § | 3 |
+| | SCL | GPIO3 § | 5 |
 | | VCC | — | 1 (3.3V) |
 | | GND | — | 6 |
 
@@ -147,7 +147,7 @@ Two ultrasonic sensors means one nuance worth stating explicitly: **override eng
 
 † GPIO8 is SPI0 CE0 under its ALT function — fine as a plain GPIO as long as SPI0 isn't enabled elsewhere on the board.
 ‡ INT is wired but **not yet used** — see [Known limitations](#-known-limitations-read-this).
-§ GPIO0/1 is the Pi's I2C0 (`ID_SD`/`ID_SC`) bus — physically separate from the MPU6500's I2C1 bus, and normally reserved for HAT EEPROM auto-detection, so it isn't guaranteed to already be enabled as a general-purpose bus on every QNX BSP config. `oled_task` takes its device path as an argument (default `/dev/i2c0`) specifically so this can be corrected without a rebuild — see [Known limitations](#-known-limitations-read-this).
+§ The OLED shares the MPU6500's I2C1 bus (same physical SDA/SCL wires, different address: 0x3C vs 0x68) rather than using its own GPIO0/1 bus. It was originally wired to GPIO0/1, but a full-address-range bus scan found nothing responding there — GPIO0/1 is the Pi's I2C0 (`ID_SD`/`ID_SC`) bus, reserved for HAT EEPROM detection, and unlike GPIO2/3 the board doesn't supply pull-up resistors on those pins, so SDA/SCL just floated. I2C being multi-drop makes sharing the working bus the simpler fix.
 
 ---
 
@@ -206,7 +206,7 @@ Six terminals, **foreground**, in this order (GPIO access needs root; I²C doesn
 | C | `sudo ./ultrasonic_task-1` | **yes** |
 | D | `sudo ./ultrasonic_task-2` | **yes** |
 | E | `./cli_status --watch` | no |
-| F | `./oled_task` (or `./oled_task /dev/i2cN` if `/dev/i2c0` isn't the right node — check `ls /dev/i2c*`) | no |
+| F | `./oled_task` | no |
 
 ### Sample output
 
@@ -254,7 +254,7 @@ Honesty over hackathon theater:
 - **IMU sampling is polled (20Hz), not interrupt-driven.** The INT pin needs an exact GPIO→IRQ vector mapping specific to this BSP that wasn't available — polling is correct, just not the lowest-latency option.
 - **Automatic process respawn was removed.** It briefly called `posix_spawn()` from `supervisor`'s max-priority `SCHED_FIFO` thread, which wedged the whole process (confirmed via `pidin -p` showing it blocked in `REPLY` state against `procnto`, unkillable even by `SIGKILL`). Recovery is now detected, timed, and logged — just not auto-executed. Restart the dead process manually when `[RECOVERY]` shows up.
 - **GPIO access requires root** (`ThreadCtl(_NTO_TCTL_IO)`); I²C only requires group membership on `/dev/i2cN`. That's why the run table above has two different privilege levels.
-- **The OLED's I2C bus device path is a best guess, not a verified fact.** GPIO0/1 (`ID_SD`/`ID_SC`) is a physically separate controller from the MPU6500's bus and is conventionally reserved for HAT EEPROM detection — whether it's exposed as `/dev/i2c0` (or at all) depends on this board's QNX startup config, which this code can't inspect. `oled_task` takes the path as an argument for exactly this reason; run `ls /dev/i2c*` on the Pi first if `/dev/i2c0` doesn't work.
+- **The OLED shares the IMU's I2C bus, not its own.** It was originally wired to GPIO0/1 (I2C0, the `ID_SD`/`ID_SC` bus), which turned out to be a dead end: a full-address-range scan (`devctl(DCMD_I2C_SEND)` against every 7-bit address) found nothing responding at all, while the same scan against the MPU6500's bus immediately found it at 0x68. The Pi doesn't populate pull-up resistors on GPIO0/1 the way it does on GPIO2/3 — that bus is meant for a HAT to supply its own pull-ups for EEPROM detection — so with nothing else on it, SDA/SCL just floated. Moving the OLED onto GPIO2/3 (I2C1) fixed it: I2C is multi-drop, so the OLED (0x3C) and MPU6500 (0x68) coexist on the same two wires without conflict. `oled_task`'s device path is still a runtime argument (default `/dev/i2c1`), not hardcoded, in case the wiring changes again.
 - **The OLED font is a hand-built 5x7 bitmap covering only space, `A`-`Z`, `0`-`9`, and `: . - ( )`** — enough for every string this project displays, not general text. An unsupported character renders as a blank cell rather than garbage, so a typo shows up as a gap, not corruption.
 
 <div align="center">

@@ -107,19 +107,26 @@ void Ssd1306::clear() {
 void Ssd1306::drawText(uint8_t page, uint8_t col, const char* text) {
     if (page >= PAGES || col >= WIDTH) return;
 
-    // 5 glyph columns + 1 blank column of inter-character spacing.
-    uint8_t buf[MAX_PAYLOAD];
-    size_t  used = 0;
-    for (const char* p = text; *p != '\0' && col + used + 6 <= WIDTH; ++p) {
+    // Always rewrites the *whole* rest of the row, not just the bytes the
+    // new text needs. Drawing only `text`'s own glyph bytes left the tail
+    // of whatever previously occupied this row on screen whenever the new
+    // string was shorter (e.g. "US1:134CM" -> "US1: 87CM", or "VEHICLE
+    // MOVING" -> "VEHICLE STOPPED" landing at a different length) -- stale
+    // pixels that looked like flicker/ghosting on every update instead of
+    // a clean redraw.
+    const size_t rowLen = WIDTH - col;
+    uint8_t      buf[WIDTH];
+    size_t       used = 0;
+    for (const char* p = text; *p != '\0' && used + 6 <= rowLen; ++p) {
         const uint8_t* glyph = glyphFor(*p);
         memcpy(buf + used, glyph, 5);
         buf[used + 5] = 0x00;
         used += 6;
     }
-    if (used == 0) return;
+    memset(buf + used, 0x00, rowLen - used);
 
-    setWindow(page, page, col, static_cast<uint8_t>(col + used - 1));
-    writeData(buf, used);
+    setWindow(page, page, col, static_cast<uint8_t>(WIDTH - 1));
+    writeData(buf, rowLen);
 }
 
 Ssd1306::~Ssd1306() {

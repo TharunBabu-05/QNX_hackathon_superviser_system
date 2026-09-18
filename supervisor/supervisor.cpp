@@ -15,14 +15,11 @@
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
-#include <spawn.h>
 #include <errno.h>
 #include <sys/neutrino.h>
 #include <sys/dispatch.h>
 
 #include "protocol.h"
-
-extern char** environ;
 
 namespace {
 
@@ -41,16 +38,21 @@ constexpr uint64_t HEARTBEAT_TIMEOUT_NS = 250ULL * 1000000; // ~5 missed 50ms be
 
 constexpr float OBSTACLE_THRESHOLD_CM = 20.0f;
 
-// How long a dead process gets to reconnect on its own before this
-// process attempts to respawn it, and how many times it will try before
-// giving up and staying in SAFE_STOP for a human to intervene.
+// How long a dead process gets to reconnect on its own before this logs
+// a recovery prompt, and how many times it will repeat that before going
+// quiet and staying in SAFE_STOP for a human to intervene.
+//
+// This deliberately does NOT call posix_spawn() to respawn anything.
+// Earlier it did, and that wedged this process permanently: posix_spawn()
+// talks to procnto to create the child, and this thread runs at the
+// system's highest SCHED_FIFO priority with no scheduling attributes
+// passed to posix_spawn() to override that for the child -- so the new
+// process likely inherited it, and creating a second max-priority
+// real-time thread while this one sat blocked waiting for procnto's
+// reply produced a hang that not even SIGKILL could clear. The detection
+// and timing logic below is unchanged; only the actual respawn action is.
 constexpr uint64_t RECOVERY_GRACE_NS     = 2000ULL * 1000000;
 constexpr unsigned MAX_RESPAWN_ATTEMPTS  = 3;
-
-// Deployment-specific: update these to wherever the binaries actually
-// live on the target before relying on automatic respawn.
-constexpr const char* ULTRASONIC_TASK_PATH = "/tmp/qnx/ultrasonic_task";
-constexpr const char* IMU_TASK_PATH        = "/tmp/qnx/imu_task";
 
 // ---- State ----------------------------------------------------------------
 
@@ -211,25 +213,23 @@ void checkDeadline(SubsystemState& s, uint64_t now, uint64_t deadlineNs) {
     s.dataHealth = (age > deadlineNs) ? SensorHealth::Degraded : SensorHealth::Healthy;
 }
 
-// Attempts to relaunch a subsystem that the watchdog declared dead, once
-// it has been given RECOVERY_GRACE_NS to reconnect on its own. Bounded by
-// MAX_RESPAWN_ATTEMPTS so a permanently broken sensor cannot turn into a
-// respawn loop -- past that limit this stays in SAFE_STOP for a human.
-void tryRecover(SubsystemState& s, const char* path, const char* name, uint64_t now) {
+// Reports a subsystem the watchdog declared dead, once it has been given
+// RECOVERY_GRACE_NS to reconnect on its own. Bounded by MAX_RESPAWN_ATTEMPTS
+// so a permanently broken sensor doesn't spam this forever -- past that
+// limit this stays quiet in SAFE_STOP for a human to intervene. Does not
+// respawn anything automatically -- see the comment on RECOVERY_GRACE_NS
+// for why that was removed.
+void tryRecover(SubsystemState& s, const char* name, uint64_t now) {
     if (s.processAlive || s.recoveryStartedNs == 0) return;
     if (now - s.recoveryStartedNs < RECOVERY_GRACE_NS) return;
     if (s.respawnAttempts >= MAX_RESPAWN_ATTEMPTS) return;
 
-    pid_t pid;
-    char* argv[] = { const_cast<char*>(path), nullptr };
-    if (posix_spawn(&pid, path, nullptr, nullptr, argv, environ) == 0) {
-        s.respawnAttempts++;
-        s.recoveryStartedNs = now; // give the new instance its own grace period
-        printf("[RECOVERY] respawned %s (pid %d), attempt %u/%u\n",
-               name, pid, s.respawnAttempts, MAX_RESPAWN_ATTEMPTS);
-    } else {
-        perror("posix_spawn failed");
-    }
+    s.respawnAttempts++;
+    s.recoveryStartedNs = now;
+    printf("[RECOVERY] %s still down after %llums -- attempt %u/%u -- "
+           "restart it manually (automatic respawn is disabled)\n",
+           name, static_cast<unsigned long long>(RECOVERY_GRACE_NS / 1000000),
+           s.respawnAttempts, MAX_RESPAWN_ATTEMPTS);
 }
 
 void recomputeSystemState() {
@@ -253,8 +253,8 @@ void onSafetyTick(uint64_t now) {
     checkWatchdog(g_imu, now, "imu_task");
     checkDeadline(g_ultrasonic, now, ULTRASONIC_DEADLINE_NS);
     checkDeadline(g_imu, now, IMU_DEADLINE_NS);
-    tryRecover(g_ultrasonic, ULTRASONIC_TASK_PATH, "ultrasonic_task", now);
-    tryRecover(g_imu, IMU_TASK_PATH, "imu_task", now);
+    tryRecover(g_ultrasonic, "ultrasonic_task", now);
+    tryRecover(g_imu, "imu_task", now);
     recomputeSystemState();
 }
 

@@ -37,12 +37,16 @@ bool i2cWriteReg(int fd, uint8_t reg, uint8_t value) {
 
 // Reads `len` bytes starting at register `reg`. MPU6500 registers are read
 // by writing the register address (no stop) then a repeated-start read of
-// the value -- DCMD_I2C_SENDRECV does both halves as one bus transaction:
-// header, followed by the send bytes, followed by space for the recv bytes.
+// the value -- DCMD_I2C_SENDRECV does both halves as one bus transaction.
+// The driver reuses the same data region for both directions: the register
+// address is written at the offset right after the header, and the bytes
+// read back overwrite that same offset (there's no reason to keep the sent
+// byte once it's been clocked out), so the buffer only needs to be as big
+// as the larger of send_len/recv_len, not their sum.
 bool i2cReadRegs(int fd, uint8_t reg, uint8_t* out, unsigned len) {
     if (len > 32) return false; // driver used for small register blocks only
 
-    uint8_t buf[sizeof(i2c_sendrecv_t) + 1 + 32];
+    uint8_t buf[sizeof(i2c_sendrecv_t) + 32];
     auto* hdr = reinterpret_cast<i2c_sendrecv_t*>(buf);
     hdr->slave.addr = MPU6500_ADDR;
     hdr->slave.fmt  = I2C_ADDRFMT_7BIT;
@@ -51,10 +55,11 @@ bool i2cReadRegs(int fd, uint8_t reg, uint8_t* out, unsigned len) {
     hdr->stop       = 1;
     buf[sizeof(i2c_sendrecv_t)] = reg;
 
-    if (devctl(fd, DCMD_I2C_SENDRECV, buf, sizeof(i2c_sendrecv_t) + 1 + len, NULL) != EOK) {
+    const unsigned dataLen = (len > 1) ? len : 1;
+    if (devctl(fd, DCMD_I2C_SENDRECV, buf, sizeof(i2c_sendrecv_t) + dataLen, NULL) != EOK) {
         return false;
     }
-    memcpy(out, buf + sizeof(i2c_sendrecv_t) + 1, len);
+    memcpy(out, buf + sizeof(i2c_sendrecv_t), len);
     return true;
 }
 

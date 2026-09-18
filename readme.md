@@ -45,6 +45,7 @@ flowchart TB
     HC1["HC-SR04 #1<br/>TRIG=GPIO23 (pin16)<br/>ECHO=GPIO24 (pin18)"]:::hw
     HC2["HC-SR04 #2<br/>TRIG=GPIO25 (pin22)<br/>ECHO=GPIO8 (pin24)"]:::hw
     IMUHW["MPU6500<br/>SDA=GPIO2 (pin3)<br/>SCL=GPIO3 (pin5)"]:::hw
+    OLEDHW["SSD1306 OLED<br/>SDA=GPIO0 (pin27)<br/>SCL=GPIO1 (pin28)"]:::hw
 
     U1["ultrasonic_task-1<br/><sub>mmap_device_memory GPIO</sub>"]:::proc
     U2["ultrasonic_task-2<br/><sub>mmap_device_memory GPIO</sub>"]:::proc
@@ -52,10 +53,13 @@ flowchart TB
 
     SUP{{"safety_supervisor<br/>SCHED_FIFO, max priority<br/>watchdog · deadline · override · recovery"}}:::sup
     CLI["cli_status<br/><sub>read-only observer</sub>"]:::cli
+    OLED["oled_task<br/><sub>read-only observer</sub>"]:::cli
+    FI["fault_injector<br/><sub>on-demand fault demo</sub>"]:::cli
 
     HC1 --> U1
     HC2 --> U2
     IMUHW --> IMU
+    OLEDHW --> OLED
 
     U1 -->|"MsgSend UltrasonicMsg"| SUP
     U1 -.->|"MsgSendPulse heartbeat"| SUP
@@ -63,12 +67,15 @@ flowchart TB
     U2 -.->|"MsgSendPulse heartbeat"| SUP
     IMU -->|"MsgSend ImuMsg"| SUP
     IMU -.->|"MsgSendPulse heartbeat"| SUP
+    FI -.->|"MsgSend UltrasonicMsg (fake)"| SUP
 
     CLI -->|"MsgSend CliStatusRequest"| SUP
     SUP -->|"MsgReply CliStatusReply"| CLI
+    OLED -->|"MsgSend CliStatusRequest"| SUP
+    SUP -->|"MsgReply CliStatusReply"| OLED
 ```
 
-Solid arrows are **synchronous `MsgSend`/`MsgReply`** (sensor data, CLI queries). Dashed arrows are **async `MsgSendPulse`** heartbeats — cheap, non-blocking, and never delayed by a slow sample cycle because each runs on its own thread. Every arrow into `supervisor` terminates at the *same* channel; `name_attach()`/`name_open()` let all four clients find it by name, with zero hardcoded pids.
+Solid arrows are **synchronous `MsgSend`/`MsgReply`** (sensor data, CLI/OLED queries). Dashed arrows are **async `MsgSendPulse`** heartbeats — cheap, non-blocking, and never delayed by a slow sample cycle because each runs on its own thread — plus `fault_injector`'s deliberately-fake reading, sent the same way a real sensor would. Every arrow into `supervisor` terminates at the *same* channel; `name_attach()`/`name_open()` let every client find it by name, with zero hardcoded pids.
 
 ### Safety state machine
 
@@ -110,6 +117,7 @@ stateDiagram-v2
 | 📋 **Safety Events** | 16-entry ring buffer | `Obstacle`, `SensorTimeout`, `ProcessDead/Recovered`, `OverrideEngaged/Cleared`, `AnomalyDetected` — every entry tagged with its source (`US1`/`US2`/`IMU`/`SYS`) and a snapshot of both ultrasonic distances at that instant |
 | 💚 **Health Status** | per-subsystem + overall | `SensorHealth{Healthy,Degraded,Dead}` × 3 subsystems, rolled up into one `SystemState` |
 | 🖥️ **CLI (mandatory)** | `cli_status` | `./cli_status` for one snapshot, `./cli_status --watch` to poll live — read-only, cannot influence the control path |
+| 📺 **On-vehicle display** | `oled_task` | Same read-only `CliStatusRequest` query as `cli_status`, rendered to a physical SSD1306 panel: `VEHICLE MOVING` + live sensor data, or `VEHICLE STOPPED` + `OBSTACLE`/`ANOMALY DETECTED` the instant override engages |
 
 ### 🎯 The override rule, precisely
 
@@ -130,11 +138,16 @@ Two ultrasonic sensors means one nuance worth stating explicitly: **override eng
 | **MPU6500** | SDA | GPIO2 | 3 |
 | | SCL | GPIO3 | 5 |
 | | INT ‡ | GPIO17 | 11 |
+| **SSD1306 OLED** | SDA | GPIO0 § | 27 |
+| | SCL | GPIO1 § | 28 |
+| | VCC | — | 1 (3.3V) |
+| | GND | — | 6 |
 
 </div>
 
 † GPIO8 is SPI0 CE0 under its ALT function — fine as a plain GPIO as long as SPI0 isn't enabled elsewhere on the board.
 ‡ INT is wired but **not yet used** — see [Known limitations](#-known-limitations-read-this).
+§ GPIO0/1 is the Pi's I2C0 (`ID_SD`/`ID_SC`) bus — physically separate from the MPU6500's I2C1 bus, and normally reserved for HAT EEPROM auto-detection, so it isn't guaranteed to already be enabled as a general-purpose bus on every QNX BSP config. `oled_task` takes its device path as an argument (default `/dev/i2c0`) specifically so this can be corrected without a rebuild — see [Known limitations](#-known-limitations-read-this).
 
 ---
 
@@ -149,10 +162,11 @@ hello/
 ├── imu_task/               # MPU6500 over /dev/i2c1: mpu6500.{h,cpp}, imu_task.cpp
 ├── supervisor/             # the safety state machine — supervisor.cpp
 ├── cli_status/             # read-only status client — cli_status.cpp
-└── fault_injector/         # optional 6th tool — proves Fault Tolerance/Recovery live, see below
+├── oled_task/              # read-only SSD1306 display client — ssd1306.{h,cpp}, font5x7.h, oled_task.cpp
+└── fault_injector/         # optional demo tool — proves Fault Tolerance/Recovery live, see below
 ```
 
-Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`/`nto/`), building independent `aarch64le` + `x86_64` executables — six binaries total; the first five are the always-on system, `fault_injector` is a demo/test tool you run on demand.
+Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`/`nto/`), building independent `aarch64le` + `x86_64` executables — seven binaries total; the first six are the always-on system, `fault_injector` is a demo/test tool you run on demand.
 
 ---
 
@@ -175,14 +189,15 @@ scp -o MACs=hmac-sha2-256 \
     imu_task/nto/aarch64/o-le/imu_task \
     supervisor/nto/aarch64/o-le/supervisor \
     cli_status/nto/aarch64/o-le/cli_status \
+    oled_task/nto/aarch64/o-le/oled_task \
     fault_injector/nto/aarch64/o-le/fault_injector \
     qnxuser@<PI_IP>:/tmp/
 
 # 2. on the Pi
-cd /tmp && chmod +x ultrasonic_task-1 ultrasonic_task-2 imu_task supervisor cli_status fault_injector
+cd /tmp && chmod +x ultrasonic_task-1 ultrasonic_task-2 imu_task supervisor cli_status oled_task fault_injector
 ```
 
-Five terminals, **foreground**, in this order (GPIO access needs root; I²C doesn't):
+Six terminals, **foreground**, in this order (GPIO access needs root; I²C doesn't):
 
 | # | Command | Needs `sudo`? |
 |:-:|---|:-:|
@@ -191,6 +206,7 @@ Five terminals, **foreground**, in this order (GPIO access needs root; I²C does
 | C | `sudo ./ultrasonic_task-1` | **yes** |
 | D | `sudo ./ultrasonic_task-2` | **yes** |
 | E | `./cli_status --watch` | no |
+| F | `./oled_task` (or `./oled_task /dev/i2cN` if `/dev/i2c0` isn't the right node — check `ls /dev/i2c*`) | no |
 
 ### Sample output
 
@@ -211,7 +227,7 @@ Every event line names **which subsystem** caused it (`src=US1/US2/IMU/SYS`) and
 
 ---
 
-## 🧪 Fault injection demo (the 6th terminal)
+## 🧪 Fault injection demo (the 7th terminal)
 
 The problem statement's exact wording is: *"The supervisor must override unsafe commands and place the vehicle in a safe state within a defined deadline."* Concretely, in this project that means two separate things `fault_injector` lets you trigger and watch on demand:
 
@@ -221,7 +237,7 @@ The problem statement's exact wording is: *"The supervisor must override unsafe 
 `fault_injector` doesn't touch the real sensor — it runs **alongside** `ultrasonic_task-1`/`-2` and sends the supervisor a reading no real HC-SR04 echo could produce (e.g. 5000cm, outside the 2–400cm physical range) for whichever sensor you pick. The supervisor can't tell that apart from a genuinely stuck/corrupted sensor, which is the point: it's a fault, not a false obstacle, so it's logged as `ANOMALY_DETECTED`, not `OBSTACLE`.
 
 ```bash
-# terminal F, while A-E above are already running:
+# terminal G, while A-F above are already running:
 ./fault_injector 1          # inject a fake fault into ultrasonic-1 (or `2` for the other sensor)
 ```
 
@@ -237,7 +253,9 @@ Honesty over hackathon theater:
 
 - **IMU sampling is polled (20Hz), not interrupt-driven.** The INT pin needs an exact GPIO→IRQ vector mapping specific to this BSP that wasn't available — polling is correct, just not the lowest-latency option.
 - **Automatic process respawn was removed.** It briefly called `posix_spawn()` from `supervisor`'s max-priority `SCHED_FIFO` thread, which wedged the whole process (confirmed via `pidin -p` showing it blocked in `REPLY` state against `procnto`, unkillable even by `SIGKILL`). Recovery is now detected, timed, and logged — just not auto-executed. Restart the dead process manually when `[RECOVERY]` shows up.
-- **GPIO access requires root** (`ThreadCtl(_NTO_TCTL_IO)`); I²C only requires group membership on `/dev/i2c1`. That's why the run table above has two different privilege levels.
+- **GPIO access requires root** (`ThreadCtl(_NTO_TCTL_IO)`); I²C only requires group membership on `/dev/i2cN`. That's why the run table above has two different privilege levels.
+- **The OLED's I2C bus device path is a best guess, not a verified fact.** GPIO0/1 (`ID_SD`/`ID_SC`) is a physically separate controller from the MPU6500's bus and is conventionally reserved for HAT EEPROM detection — whether it's exposed as `/dev/i2c0` (or at all) depends on this board's QNX startup config, which this code can't inspect. `oled_task` takes the path as an argument for exactly this reason; run `ls /dev/i2c*` on the Pi first if `/dev/i2c0` doesn't work.
+- **The OLED font is a hand-built 5x7 bitmap covering only space, `A`-`Z`, `0`-`9`, and `: . - ( )`** — enough for every string this project displays, not general text. An unsupported character renders as a blank cell rather than garbage, so a typo shows up as a gap, not corruption.
 
 <div align="center">
 

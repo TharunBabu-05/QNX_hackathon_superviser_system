@@ -2,6 +2,7 @@
 #define ULTRASONIC_H
 
 #include "gpio.h"
+#include "protocol.h" // SensorStatus is shared with the supervisor's wire protocol
 
 // HC-SR04 has no identification/handshake line, so "is it connected" can
 // only be inferred from how it behaves when triggered:
@@ -12,8 +13,6 @@
 //                   a real target; it's noise from a floating/miswired ECHO
 //                   line, so it is reported as a fault, not a distance.
 //   Connected    -- a plausible echo pulse arrived; distanceCm is valid.
-enum class SensorStatus { Connected, Disconnected, OutOfRange };
-
 struct Reading {
     SensorStatus status;
     float distanceCm; // meaningful only when status == Connected/OutOfRange

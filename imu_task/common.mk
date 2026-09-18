@@ -4,8 +4,10 @@ QCONFIG=qconfig.mk
 endif
 include $(QCONFIG)
 
-NAME=hello
+NAME=imu_task
 
+# protocol.h (shared IPC message/pulse definitions) lives one level up.
+EXTRA_INCVPATH+=$(PROJECT_ROOT)/../common
 
 
 #This has to be included last

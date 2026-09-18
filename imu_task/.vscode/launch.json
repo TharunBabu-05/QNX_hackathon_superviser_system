@@ -4,10 +4,10 @@
     {
       "type": "qnx-gdb",
       "request": "launch",
-      "name": "QNX: hello",
+      "name": "QNX: imu_task",
       "gdb": "gdb",
       "program": "${command:qnx.autodetectBinary}",
-      "remotePath": "hello",
+      "remotePath": "imu_task",
       "qnxtarget": "default",
       "upload": true,
       "stopAtEntry": true,

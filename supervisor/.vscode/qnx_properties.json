@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "template": {
+    "projectId": "supervisor",
+    "artifactName": "supervisor",
+    "buildType": "QnxRecMake",
+    "language": "cpp",
+    "archlist": "x86_64,aarch64le",
+    "artifactType": "Executable"
+  }
+}

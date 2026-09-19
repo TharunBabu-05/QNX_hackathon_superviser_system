@@ -7,6 +7,7 @@
 */nto/aarch64/o-le/cli_status
 */nto/aarch64/o-le/fault_injector
 */nto/aarch64/o-le/oled_task
+*/nto/aarch64/o-le/metrics_server
 */nto/x86_64/o/ultrasonic_task-1
 */nto/x86_64/o/ultrasonic_task-2
 */nto/x86_64/o/imu_task
@@ -14,3 +15,4 @@
 */nto/x86_64/o/cli_status
 */nto/x86_64/o/fault_injector
 */nto/x86_64/o/oled_task
+*/nto/x86_64/o/metrics_server

@@ -163,10 +163,11 @@ hello/
 ├── supervisor/             # the safety state machine — supervisor.cpp
 ├── cli_status/             # read-only status client — cli_status.cpp
 ├── oled_task/              # read-only SSD1306 display client — ssd1306.{h,cpp}, font5x7.h, oled_task.cpp
-└── fault_injector/         # optional demo tool — proves Fault Tolerance/Recovery live, see below
+├── fault_injector/         # optional demo tool — proves Fault Tolerance/Recovery live, see below
+└── metrics_server/         # live OS metrics over HTTP — metrics_server.cpp, dashboard.html (browser client)
 ```
 
-Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`/`nto/`), building independent `aarch64le` + `x86_64` executables — seven binaries total; the first six are the always-on system, `fault_injector` is a demo/test tool you run on demand.
+Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`/`nto/`), building independent `aarch64le` + `x86_64` executables — eight binaries total; the first six are the always-on safety system, `fault_injector` is a demo/test tool you run on demand, and `metrics_server` is an independent, optional observability add-on (see below) with no dependency on the supervisor's IPC.
 
 ---
 
@@ -247,6 +248,29 @@ Watch terminal E (`cli_status --watch`): `Ultrasonic-1` flips to `DEAD`, `System
 
 ---
 
+## 📊 Live system metrics dashboard
+
+`metrics_server` is a standalone, optional add-on with no ties to the supervisor's IPC — it walks `/proc` directly, through QNX's documented procfs `devctl()` interface (`DCMD_PROC_INFO`, `DCMD_PROC_TIDSTATUS`, `DCMD_PROC_MAPDEBUG_BASE` — the same interface `pidin` and the IDE's own process views are built on, not text-scraped `pidin` output), and serves every process/thread on the box as JSON over plain HTTP.
+
+```bash
+# copy it over the same way as everything else, then on the Pi:
+scp -o MACs=hmac-sha2-256 metrics_server/nto/aarch64/o-le/metrics_server qnxuser@<PI_IP>:/tmp/
+chmod +x /tmp/metrics_server
+
+# terminal H, on the Pi:
+./metrics_server        # listens on 0.0.0.0:8090
+```
+
+`dashboard.html` (in this same folder) is the browser client — open it **on your laptop**, not the Pi. It can't be a hosted claude.ai Artifact: a published Artifact page is sandboxed and blocked from reaching a local-network address like your Pi's IP, so this ships as a plain local file instead. Double-click it to open in any browser, type your Pi's IP (`http://<PI_IP>:8090`) into the field at top, click **Connect**, and it polls live:
+
+- System summary tiles (CPU cores, aggregate CPU%, total memory, process/thread counts, server uptime)
+- A rolling aggregate-CPU% chart
+- A sortable process table (PID, name, thread count, priority, private memory, CPU%) — click a row to expand its per-thread breakdown (TID, state, priority, scheduling policy, last CPU, CPU%)
+
+CPU% is computed from each process/thread's own accumulated run-time delta between polls (`utime`/`stime`/`sutime` from `debug_process_t`/`debug_thread_t`), the same technique `top`/`pidin -y` use without an instrumented kernel — there's no `procnto-instr` dependency here, unlike the System Profiler covered earlier.
+
+---
+
 ## ⚠️ Known limitations (read this)
 
 Honesty over hackathon theater:
@@ -256,6 +280,8 @@ Honesty over hackathon theater:
 - **GPIO access requires root** (`ThreadCtl(_NTO_TCTL_IO)`); I²C only requires group membership on `/dev/i2cN`. That's why the run table above has two different privilege levels.
 - **The OLED shares the IMU's I2C bus, not its own.** It was originally wired to GPIO0/1 (I2C0, the `ID_SD`/`ID_SC` bus), which turned out to be a dead end: a full-address-range scan (`devctl(DCMD_I2C_SEND)` against every 7-bit address) found nothing responding at all, while the same scan against the MPU6500's bus immediately found it at 0x68. The Pi doesn't populate pull-up resistors on GPIO0/1 the way it does on GPIO2/3 — that bus is meant for a HAT to supply its own pull-ups for EEPROM detection — so with nothing else on it, SDA/SCL just floated. Moving the OLED onto GPIO2/3 (I2C1) fixed it: I2C is multi-drop, so the OLED (0x3C) and MPU6500 (0x68) coexist on the same two wires without conflict. `oled_task`'s device path is still a runtime argument (default `/dev/i2c1`), not hardcoded, in case the wiring changes again.
 - **The OLED font is a hand-built 5x7 bitmap covering only space, `A`-`Z`, `0`-`9`, and `: . - ( )`** — enough for every string this project displays, not general text. An unsupported character renders as a blank cell rather than garbage, so a typo shows up as a gap, not corruption.
+- **`metrics_server` may need root to see every process, not just its own.** Reading another user's `/proc/<pid>/as` for process/thread info is gated by QNX's abilities model the same way GPIO is; if some processes silently don't show up in the dashboard, run it with `sudo`. It has no other privileged dependency — it's plain TCP + procfs reads, no GPIO/I2C involved.
+- **`metrics_server`'s HTTP server is intentionally minimal.** One blocking accept/read/write/close loop, any request path returns the same JSON — fine for one dashboard polling it, not meant to survive concurrent clients or a real HTTP client library's edge cases.
 
 <div align="center">
 

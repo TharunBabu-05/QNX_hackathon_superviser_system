@@ -2,7 +2,7 @@
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=200&section=header&text=Autonomous%20Vehicle%20Safety%20Supervisor&fontSize=36&fontColor=ffffff&animation=fadeIn&fontAlignY=35&desc=QNX%20Microkernel%20%C2%B7%20Multi-Process%20Safety%20Architecture%20%C2%B7%20Raspberry%20Pi%204B&descAlignY=55&descSize=17" width="100%"/>
 
-<img src="https://readme-typing-svg.demolab.com/?font=Fira+Code&weight=600&size=20&duration=2800&pause=900&color=A855F7&center=true&vCenter=true&width=820&lines=5+independent+QNX+processes+%E2%80%94+not+5+threads;Native+message+passing+%2B+pulses%2C+not+sockets;SCHED_FIFO+priority+override+%E2%80%94+the+supervisor+always+wins;Heartbeat+watchdog+%2B+safety+deadlines+%2B+recovery+timer;2%C3%97+HC-SR04+%2B+MPU6500+IMU%2C+fused+into+one+decision" alt="Typing SVG"/>
+<img src="https://readme-typing-svg.demolab.com/?font=Fira+Code&weight=600&size=20&duration=2800&pause=900&color=A855F7&center=true&vCenter=true&width=820&lines=8+independent+QNX+processes+%E2%80%94+not+8+threads;Native+message+passing+%2B+pulses%2C+not+sockets;SCHED_FIFO+priority+override+%E2%80%94+the+supervisor+always+wins;Heartbeat+watchdog+%2B+safety+deadlines+%2B+recovery+timer;2%C3%97+HC-SR04+%2B+MPU6500+IMU%2C+fused+into+one+decision;%2B+OLED%2C+fault+injection%2C+live+procfs+metrics+over+HTTP" alt="Typing SVG"/>
 
 <br/>
 
@@ -20,14 +20,21 @@
 
 ## What this actually is
 
-A **safety supervisor for autonomous vehicles**, built as five independent QNX processes instead of one program with five functions. That's not a style choice — it's the entire point. On a monolithic OS, "isolating the safety logic from the sensor drivers" is a discipline you hope your team maintains. On QNX, it's **structural**: `imu_task` can segfault on a bad I²C read and `supervisor` will never know, because they don't share an address space. This repo is built to prove that difference, not just claim it.
+A **safety supervisor for autonomous vehicles**, built as independent QNX processes instead of one program with many functions. That's not a style choice — it's the entire point. On a monolithic OS, "isolating the safety logic from the sensor drivers" is a discipline you hope your team maintains. On QNX, it's **structural**: `imu_task` can segfault on a bad I²C read and `supervisor` will never know, because they don't share an address space. This repo is built to prove that difference, not just claim it.
+
+Eight processes total, in two tiers:
 
 <div align="center">
 
 | | | |
 |:---:|:---:|:---:|
-| 🟣 **5 processes** | 🟠 **2× ultrasonic + 1× IMU** | 🔴 **1 supervisor at max RT priority** |
-| Own address space each | Fused into one override decision | Watchdog + deadline + recovery for all three |
+| 🟣 **6-process always-on safety system** | 🟠 **2× ultrasonic + 1× IMU + 1× OLED + 1× CLI, orbiting 1 supervisor** | 🔴 **supervisor runs at max RT priority** |
+| Own address space each | Fused into one override decision | Watchdog + deadline + recovery for all three sensors |
+
+| | | |
+|:---:|:---:|:---:|
+| 🟢 **2 optional add-on tools** | 🧪 **`fault_injector`** | 📊 **`metrics_server`** |
+| Neither is load-bearing for safety | Proves Fault Tolerance/Recovery live, on demand | Independent procfs/HTTP observability, no supervisor IPC |
 
 </div>
 
@@ -77,6 +84,8 @@ flowchart TB
 
 Solid arrows are **synchronous `MsgSend`/`MsgReply`** (sensor data, CLI/OLED queries). Dashed arrows are **async `MsgSendPulse`** heartbeats — cheap, non-blocking, and never delayed by a slow sample cycle because each runs on its own thread — plus `fault_injector`'s deliberately-fake reading, sent the same way a real sensor would. Every arrow into `supervisor` terminates at the *same* channel; `name_attach()`/`name_open()` let every client find it by name, with zero hardcoded pids.
 
+**`metrics_server` is deliberately not in this diagram.** It has no IPC connection to `supervisor` at all — it walks `/proc` directly through QNX's procfs `devctl()` interface and serves the result over its own TCP socket. That's the point of it: an independent, OS-level observability layer that can inspect every process on the box (including `supervisor` itself) precisely *because* it isn't wired into the safety system's channel — a bug in `metrics_server` can't touch the control path, the same isolation guarantee the rest of this project relies on, just pointed outward instead of inward.
+
 ### Safety state machine
 
 ```mermaid
@@ -106,7 +115,7 @@ stateDiagram-v2
 
 | Requirement | Where it lives | How |
 |---|---|---|
-| 🔀 **Message Passing** | all 5 processes | Native `MsgSend`/`MsgReceive`/`MsgReply` over a `name_attach()`-registered channel — no sockets, no queues |
+| 🔀 **Message Passing** | all 6 IPC-connected processes | Native `MsgSend`/`MsgReceive`/`MsgReply` over a `name_attach()`-registered channel — no sockets, no queues |
 | 💓 **Heartbeat** | every sensor task | Dedicated thread, `MsgSendPulse` every 50ms, independent of the sampling loop |
 | 🐕 **Watchdog** | `supervisor.cpp::checkWatchdog` | ~5 missed heartbeats → process declared dead, logged, state transitions |
 | ⏱️ **Safety Deadline** | `supervisor.cpp::checkDeadline` | Data older than 300ms is untrusted even if the process is alive — a *different* failure mode than a dead process |
@@ -122,6 +131,31 @@ stateDiagram-v2
 ### 🎯 The override rule, precisely
 
 Two ultrasonic sensors means one nuance worth stating explicitly: **override engages the instant either sensor sees an obstacle, and only clears once both report clear.** A vehicle covering front and rear shouldn't ignore a rear hazard just because the front happens to be clear.
+
+---
+
+## 🧬 QNX microkernel concepts, by API
+
+Every distinct OS-level mechanism this project actually calls, across all 8 processes — not a checklist claim, a map from concept to the real function calls and the file that makes them.
+
+| Concept | QNX / POSIX API | Used in |
+|---|---|---|
+| **Process isolation** (the whole point) | Separate address spaces — no shared memory between any of these processes | Every process; proven by `imu_task` being able to crash without taking `supervisor` down with it |
+| **Synchronous message passing** | `MsgSend()` / `MsgReceive()` / `MsgReply()` | `supervisor.cpp` (server), every client (`ultrasonic_task-*`, `imu_task`, `cli_status`, `oled_task`, `fault_injector`) |
+| **Asynchronous pulses** | `MsgSendPulse()` | Heartbeats (every sensor task, every 50ms) + the supervisor's own periodic safety tick |
+| **Name-locator service** | `name_attach()` / `name_open()` / `name_close()` | `supervisor` registers as `safety_supervisor`; every client resolves it by name — zero hardcoded pids anywhere |
+| **Self-directed channel + timer pulse** | `ConnectAttach()` to your own channel, `timer_create()` + `SIGEV_PULSE_INIT` | `supervisor.cpp::startSafetyTickTimer` — the standard QNX pattern for "wake myself up periodically" |
+| **Priority-based preemptive scheduling** | `SCHED_FIFO`, `pthread_setschedparam()`, `sched_get_priority_max()` | `supervisor.cpp::raisePriority` — the concrete, scheduler-enforced meaning of "Priority Override" |
+| **QNX-native high-res timing** | `ClockCycles()`, `nanospin_ns()`, `CLOCK_MONOTONIC` via `clock_gettime()` | HC-SR04 pulse-width timing (`ultrasonic.cpp`); every timestamp in `protocol.h::monotonicNs()` |
+| **Direct hardware I/O + physical memory mapping** | `ThreadCtl(_NTO_TCTL_IO, …)`, `mmap_device_memory()` | `gpio.cpp` — maps the BCM2711 GPIO register block straight into the process, no kernel driver in between |
+| **I²C resource-manager protocol** | `<hw/i2c.h>` (`i2c_send_t`/`i2c_sendrecv_t`), `devctl(DCMD_I2C_SEND/SENDRECV)` | `mpu6500.cpp` (IMU registers), `ssd1306.cpp` (OLED init/GDDRAM writes) |
+| **procfs debug/introspection interface** | `<sys/procfs.h>`/`<sys/debug.h>`, `devctl(DCMD_PROC_INFO / DCMD_PROC_TIDSTATUS / DCMD_PROC_MAPDEBUG_BASE)` | `metrics_server.cpp` — the same kernel-level interface `pidin` and the IDE's own process views are built on |
+| **Abilities / process-manager privilege model** | root for `ThreadCtl(_NTO_TCTL_IO)` and for reading another user's `/proc/<pid>/as`; group membership suffices for `/dev/i2cN` | `ultrasonic_task-*` (must run under `sudo`), `metrics_server` (needs `sudo` to see every process, not just its own) |
+| **Networking resource manager (io-pkt)** | BSD sockets (`socket`/`bind`/`listen`/`accept`) over QNX's TCP/IP stack, linked via `-lsocket` | `metrics_server.cpp`'s built-in HTTP server — the only process here that talks off-box |
+| **System page** | `_syspage_ptr`, `SYSPAGE_ENTRY()` | CPU clock rate for timing math (`ultrasonic.cpp`), live CPU core count (`metrics_server.cpp`) |
+| **Recursive-make build system** | `Makefile` / `common.mk` / `qtargets.mk`, dual `aarch64le` + `x86_64` variants | Every one of the 8 project folders |
+
+Two things deliberately **not** used, on purpose: `posix_spawn()` (removed from the recovery path — see [Known limitations](#-known-limitations-read-this) for why it's dangerous from a max-priority `SCHED_FIFO` thread) and `procnto-instr`/kernel tracing (that's the separate QNX System Profiler tool, not a dependency of anything here — `metrics_server` deliberately computes CPU% without it).
 
 ---
 
@@ -174,7 +208,7 @@ Each subfolder is its own QNX recursive-make project (own `Makefile`/`common.mk`
 ## 🛠️ Build
 
 ```bash
-# from inside each of the 5 project folders:
+# from inside each of the 8 project folders:
 make
 ```
 
@@ -183,7 +217,7 @@ Produces `nto/aarch64/o-le/<name>` (Pi target) and `nto/x86_64/o/<name>` (host, 
 ## 🚀 Deploy & run
 
 ```bash
-# 1. copy all five binaries to the Pi
+# 1. copy the 6 always-on binaries + fault_injector to the Pi
 scp -o MACs=hmac-sha2-256 \
     ultrasonic_task-1/nto/aarch64/o-le/ultrasonic_task-1 \
     ultrasonic_task-2/nto/aarch64/o-le/ultrasonic_task-2 \
